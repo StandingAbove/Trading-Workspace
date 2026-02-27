@@ -1,0 +1,6 @@
+[submodule "quant-research"]
+	path = quant-research
+	url = https://github.com/StandingAbove/quant-research.git
+[submodule "trading-engine"]
+	path = trading-engine
+	url = https://github.com/StandingAbove/trading-engine.git

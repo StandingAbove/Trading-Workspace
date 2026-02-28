@@ -2,6 +2,3 @@
     path = quant-research
     url = https://github.com/StandingAbove/quant-research.git
 
-[submodule "trading-platform"]
-    path = trading-platform
-    url = https://github.com/StandingAbove/trading-platform.git

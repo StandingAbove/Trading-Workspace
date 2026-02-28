@@ -4,8 +4,6 @@ import pandas as pd
 DAYS_PER_YEAR = 365
 
 
-import pandas as pd
-
 def moving_average(series: pd.Series, window: int) -> pd.Series:
     window = int(window)
     if window <= 1:

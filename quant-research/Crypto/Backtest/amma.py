@@ -47,12 +47,14 @@ def AMMA(
         if pl is None:
             raise ImportError('polars is required for AMMA() model-state execution.')
 
+        if not momentum_weights:
+            raise ValueError('momentum_weights must contain at least one lookback window.')
+
         lf = bundle.model_state.lazy()
         sig_frames = []
 
         for window, weight in momentum_weights.items():
             colname = f"close_momentum_{window}"
-            sig = lf.filter(pl.col("ticker") == ticker).select([pl.col("date"), pl.col(colname).alias("sig")])
 
             sig = (
                 lf.filter(pl.col("ticker") == ticker)
@@ -88,9 +90,6 @@ def AMMA(
 
         weight_cols = [f"sig_{w}" for w in momentum_weights.keys()]
         return combined.with_columns(sum([pl.col(c) for c in weight_cols]).alias(ticker)).select(["date", ticker])
-
-    return run_model
-
 
     return run_model
 

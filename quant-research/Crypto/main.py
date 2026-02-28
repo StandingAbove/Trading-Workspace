@@ -43,7 +43,7 @@ def signal_wrapper(full_df, params):
 
     if MODEL_TO_RUN == "zscore":
         return zscore_signal(
-            full_df[PRICE_COLUMN_BTC].apply(pd.Series),
+            full_df[PRICE_COLUMN_BTC],
         )
 
     elif MODEL_TO_RUN == "trend":

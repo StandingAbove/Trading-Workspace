@@ -134,12 +134,6 @@ def ou_signal_on_spread(
     pos = pos.clip(-float(max_leverage), float(max_leverage))
     return pos.shift(1).fillna(0.0)
 
-    if not long_short:
-        pos = pos.clip(lower=0.0)
-
-    pos = pos.clip(-float(max_leverage), float(max_leverage))
-    return pos.shift(1).fillna(0.0)
-
 
 def pair_ensemble_signal(
     spread: pd.Series,

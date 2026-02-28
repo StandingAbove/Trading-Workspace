@@ -18,6 +18,13 @@ DATA_START_DATE = "2017-11-01"
 PRICE_COLUMN_BTC = "BTC-USD_close"
 PRICE_COLUMN_ETH = "ETH-USD_close"
 
+# --- IBIT (ETF) ---
+IBIT_PATH = str(_PROJECT_ROOT / "Data" / "IBIT_Data.csv")   # change filename if yours differs
+PRICE_COLUMN_IBIT = "IBIT_close"
+
+# Mining-cost column name after we standardize the loader output
+COST_COLUMN_MINE = "COST_TO_MINE"
+
 
 # =========================================================
 # Transaction Costs (Crypto Spot Baseline)
@@ -59,7 +66,7 @@ MINING_USE_LOG_EDGE = True
 OU_WINDOW = 180
 OU_ENTRY_Z = 1.5
 OU_EXIT_Z = 0.0
-OU_LONG_SHORT = True
+OU_LONG_SHORT = False
 
 
 # =========================================================
@@ -69,7 +76,7 @@ OU_LONG_SHORT = True
 ZSCORE_WINDOW = 180
 ZSCORE_ENTRY_Z = 2.0
 ZSCORE_EXIT_Z = 0.0
-ZSCORE_LONG_SHORT = True
+ZSCORE_LONG_SHORT = False
 
 USE_VOL_TARGET = False
 VOL_TARGET = 0.15
@@ -84,10 +91,16 @@ TREND_FAST_WINDOW = 20
 TREND_SLOW_WINDOW = 128
 
 TREND_AGGRESSIVE = 1.0
-TREND_NEUTRAL = 0.5
-TREND_DEFENSIVE = 0.7
+TREND_NEUTRAL = 1.0
+TREND_DEFENSIVE = 0.0
 
 TREND_LONG_ONLY = True
+
+TREND_DEFENSIVE = 0.0
+TREND_NEUTRAL = 1.0
+TREND_FAST_WINDOW = 20
+TREND_SLOW_WINDOW = 128
+USE_VOL_TARGET = False
 
 
 # =========================================================

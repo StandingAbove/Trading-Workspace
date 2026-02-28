@@ -1,133 +1,103 @@
 import numpy as np
 import pandas as pd
 
-DAYS_PER_YEAR = 365
-
-
-def moving_average(series: pd.Series, window: int) -> pd.Series:
-    window = int(window)
-    if window <= 1:
-        raise ValueError(f"window must be > 1, got {window}")
-
-    minp = max(3, window // 3)   # small floor
-    minp = min(minp, window)     # critical: min_periods cannot exceed window
-
-    return series.rolling(window=window, min_periods=minp).mean()
 
 def trend_signal(
     df: pd.DataFrame,
-    price_column: str = "BTC-USD_close",
-    fast_window: int = 20,
-    slow_window: int = 128,
-    long_only: bool = True,
-    leverage_aggressive: float = 1.3,
-    leverage_neutral: float = 1.0,
-    leverage_defensive: float = 0.7,
-) -> pd.Series:
-    fast_window = int(fast_window)
-    slow_window = int(slow_window)
-
-    if fast_window >= slow_window:
-        raise ValueError(f"fast_window must be < slow_window (got {fast_window} >= {slow_window})")
-
-    price = df[price_column].astype(float)
-
-    ma_fast = moving_average(price, fast_window)
-    ma_slow = moving_average(price, slow_window)
-
-    pos = pd.Series(leverage_neutral, index=price.index, dtype=float)
-
-    pos = np.where(ma_fast > ma_slow, leverage_aggressive, pos)
-    pos = np.where(ma_fast < ma_slow, leverage_defensive, pos)
-
-    pos = pd.Series(pos, index=price.index)
-
-    if long_only:
-        pos = pos.clip(lower=0.0)
-
-    return pos.shift(1).fillna(leverage_neutral)
-# =========================================================
-# 2. Strategy Returns
-# =========================================================
-
-def trend_returns(
-    df: pd.DataFrame,
-    position: pd.Series,
-    price_column: str = "BTC-USD_close",
+    price_column: str = "IBIT_close",
+    long_only: bool = True,  # kept for compatibility (we enforce long-only)
+    leverage_aggressive: float = 1.0,  # capped to <= 1.0
+    leverage_neutral: float = 1.0,     # used as risk-on exposure (<= 1.0)
+    leverage_defensive: float = 0.0,   # used as risk-off exposure (<= 1.0)
+    max_leverage: float = 1.0,
+    # --- core logic knobs ---
+    ema_window: int = 200,     # slow regime filter
+    band: float = 0.01,        # 1% band to reduce whipsaw
+    dd_window: int = 90,       # rolling peak window for drawdown
+    dd_stop: float = 0.18,     # go risk-off if drawdown worse than -18%
+    mom_short: int = 63,       # ~3 months momentum
+    mom_long: int = 252,       # ~1 year momentum
+    # --- optional: scale DOWN in high vol (never up) ---
+    vol_window: int = 30,
+    vol_target: float | None = None,
+    # --- optional: minimum hold to reduce flip-flops ---
+    min_hold_days: int = 5,
 ) -> pd.Series:
     """
-    Compute strategy returns.
+    Crash-filtered long-only trend.
+
+    Idea:
+      - Default: stay invested (risk-on) when regime is healthy.
+      - Risk-off only when a real crash shows up:
+          (drawdown < -dd_stop) AND (price below EMA with a band)
+        or when long momentum turns negative while price is below EMA.
+
+    Output:
+      UN-SHIFTED target position in [0, 1].
+      Your engine shifts(1) and clips, enforcing no lookahead/no leverage.
     """
+    price = df[price_column].astype(float).replace([np.inf, -np.inf], np.nan)
+    idx = df.index
 
-    price = df[price_column].astype(float)
-    ret = price.pct_change().fillna(0.0)
+    # Smooth regime proxy
+    ema = price.ewm(span=int(ema_window), adjust=False, min_periods=max(10, ema_window // 5)).mean()
 
-    position = position.reindex(price.index).fillna(0.0)
+    # Drawdown from rolling peak
+    peak = price.rolling(int(dd_window), min_periods=max(10, dd_window // 3)).max()
+    dd = (price / peak) - 1.0
+    dd = dd.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-    strat_ret = position * ret
+    # Momentum filters
+    mom_s = price.pct_change(int(mom_short)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    mom_l = price.pct_change(int(mom_long)).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-    return strat_ret
+    # Regime: price above EMA (with hysteresis band)
+    above = price > (ema * (1.0 + float(band)))
+    below = price < (ema * (1.0 - float(band)))
 
+    # Risk-off conditions (crash / bear)
+    crash = (dd < -float(dd_stop)) & below
+    bear = (mom_l < 0.0) & below
 
-# =========================================================
-# 3. Performance Metrics (365 annualization)
-# =========================================================
+    # Risk-on condition (re-enter)
+    risk_on = above & (mom_s > 0.0)
 
-def performance_summary(strat_ret: pd.Series) -> dict:
-    r = strat_ret.dropna()
-    if len(r) < 5:
-        return {}
+    # State machine with min-hold
+    state = pd.Series(0.0, index=idx, dtype=float)
+    in_pos = 0.0
+    hold = 0
 
-    ann_return = r.mean() * DAYS_PER_YEAR
-    ann_vol = r.std(ddof=1) * np.sqrt(DAYS_PER_YEAR)
-    sharpe = ann_return / ann_vol if ann_vol > 0 else np.nan
+    for i in range(len(state)):
+        if hold > 0:
+            hold -= 1
+            state.iloc[i] = in_pos
+            continue
 
-    equity = (1.0 + r).cumprod()
+        if in_pos == 0.0:
+            if bool(risk_on.iloc[i]):
+                in_pos = 1.0
+                hold = int(min_hold_days)
+        else:
+            if bool(crash.iloc[i]) or bool(bear.iloc[i]):
+                in_pos = 0.0
+                hold = int(min_hold_days)
 
-    years = len(r) / DAYS_PER_YEAR
-    cagr = equity.iloc[-1] ** (1 / years) - 1 if years > 0 else np.nan
+        state.iloc[i] = in_pos
 
-    peak = equity.cummax()
-    dd = equity / peak - 1.0
-    max_dd = dd.min()
+    # Exposures (long-only, no leverage)
+    on_expo = float(min(leverage_neutral, 1.0))
+    off_expo = float(min(leverage_defensive, 1.0))
+    pos = state * on_expo + (1.0 - state) * off_expo
 
-    return {
-        "Sharpe": float(sharpe),
-        "CAGR": float(cagr),
-        "MaxDD": float(max_dd),
-        "AnnualReturn": float(ann_return),
-        "AnnualVol": float(ann_vol),
-        "Observations": int(len(r)),
-    }
+    # Optional vol scale-down only (never lever up)
+    if vol_target is not None and np.isfinite(vol_target) and float(vol_target) > 0 and int(vol_window) > 1:
+        ret = price.pct_change()
+        vol = ret.rolling(int(vol_window), min_periods=max(5, vol_window // 3)).std()
+        scale = (float(vol_target) / vol).replace([np.inf, -np.inf], np.nan)
+        scale = scale.clip(0.0, 1.0)  # never > 1
+        pos = (pos * scale).fillna(0.0)
 
-
-# =========================================================
-# 4. Rolling Metrics
-# =========================================================
-
-def rolling_sharpe(strat_ret: pd.Series, window: int = 365) -> pd.Series:
-    """
-    Rolling Sharpe using 365-day annualization.
-    """
-
-    def _sharpe(x):
-        if x.std() == 0:
-            return np.nan
-        return np.sqrt(DAYS_PER_YEAR) * x.mean() / x.std()
-
-    return strat_ret.rolling(window).apply(_sharpe, raw=False)
-
-
-# =========================================================
-# 5. Turnover
-# =========================================================
-
-def annual_turnover(position: pd.Series) -> float:
-    """
-    Annual turnover based on absolute position changes.
-    """
-
-    turnover = position.diff().abs().sum()
-    annualized = turnover / len(position) * DAYS_PER_YEAR
-
-    return float(annualized)
+    # Final caps
+    pos = pos.fillna(0.0)
+    pos = pos.clip(0.0, float(min(max_leverage, 1.0)))
+    return pos

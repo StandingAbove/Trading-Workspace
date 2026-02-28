@@ -83,8 +83,8 @@ VOL_WINDOW = 30
 TREND_FAST_WINDOW = 20
 TREND_SLOW_WINDOW = 128
 
-TREND_AGGRESSIVE = 1.3
-TREND_NEUTRAL = 1.0
+TREND_AGGRESSIVE = 1.0
+TREND_NEUTRAL = 0.5
 TREND_DEFENSIVE = 0.7
 
 TREND_LONG_ONLY = True
@@ -112,7 +112,7 @@ MC_BLOCK_SIZE = 20
 # Leverage
 # =========================================================
 
-LEVERAGE_CAP = 1.5
+LEVERAGE_CAP = 1.0
 
 
 # =========================================================

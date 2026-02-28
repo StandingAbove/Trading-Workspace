@@ -124,7 +124,7 @@ def zscore_signal(
         long_short=long_short,
         max_leverage=max_leverage,
         use_smooth_sizing=False,
-    ).shift(-1).fillna(0.0)
+    )
 
     tf_pos = _trend_direction(price, filter_fast, filter_slow)
     if not long_short:

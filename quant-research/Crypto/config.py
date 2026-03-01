@@ -63,8 +63,8 @@ MINING_USE_LOG_EDGE = True
 # OU Model Defaults
 # =========================================================
 
-OU_WINDOW = 180
-OU_ENTRY_Z = 1.5
+OU_WINDOW = 90
+OU_ENTRY_Z = 0.75
 OU_EXIT_Z = 0.0
 OU_LONG_SHORT = False
 
@@ -73,9 +73,9 @@ OU_LONG_SHORT = False
 # Z-Score Model Defaults
 # =========================================================
 
-ZSCORE_WINDOW = 180
-ZSCORE_ENTRY_Z = 2.0
-ZSCORE_EXIT_Z = 0.0
+ZSCORE_WINDOW = 90
+ZSCORE_ENTRY_Z = 1.5
+ZSCORE_EXIT_Z = 0.5
 ZSCORE_LONG_SHORT = False
 
 USE_VOL_TARGET = False

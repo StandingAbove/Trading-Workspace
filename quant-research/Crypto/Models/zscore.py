@@ -1,144 +1,165 @@
+# Models/zscore.py
+
 import numpy as np
 import pandas as pd
 
 
+def _month_end_close(price: pd.Series) -> pd.Series:
+    try:
+        return price.resample("ME").last()
+    except ValueError:
+        return price.resample("M").last()
+
+
+def _risk_on_gate_from_monthly_ma(price: pd.Series, ma_months: int = 10) -> pd.Series:
+    monthly = _month_end_close(price)
+    ma = monthly.rolling(int(ma_months), min_periods=int(ma_months)).mean()
+    risk_on_m = (monthly > ma).astype(float)
+    return risk_on_m.reindex(price.index, method="ffill").fillna(0.0)
+
+
 def _rolling_mean(x: pd.Series, window: int) -> pd.Series:
-    window = int(window)
-    minp = min(window, max(3, window // 3))
-    return x.rolling(window, min_periods=minp).mean()
+    w = int(window)
+    minp = min(w, max(5, w // 3))
+    return x.rolling(w, min_periods=minp).mean()
 
 
 def _rolling_std(x: pd.Series, window: int) -> pd.Series:
-    window = int(window)
-    minp = min(window, max(3, window // 3))
-    return x.rolling(window, min_periods=minp).std()
-
-
-def _monthly_risk_on_gate(price: pd.Series, ma_months: int = 10) -> pd.Series:
-    ma_months = int(ma_months)
-
-    try:
-        monthly_close = price.resample("ME").last()
-    except ValueError:
-        monthly_close = price.resample("M").last()
-
-    monthly_ma = monthly_close.rolling(ma_months, min_periods=ma_months).mean()
-    risk_on_monthly = (monthly_close > monthly_ma).fillna(False)
-    risk_on_daily = risk_on_monthly.reindex(price.index).ffill()
-    risk_on_daily = risk_on_daily.where(risk_on_daily.notna(), False).astype(bool)
-    return risk_on_daily
+    w = int(window)
+    minp = min(w, max(5, w // 3))
+    return x.rolling(w, min_periods=minp).std()
 
 
 def zscore_signal(
     price_series: pd.Series,
-    window: int = 180,
-    entry_z: float = 1.0,
-    exit_z: float = 0.0,
-    long_short: bool = False,     # kept for compatibility; we enforce long-only anyway
-    max_leverage: float = 1.0,    # hard-capped to <= 1.0
+    window: int = 90,
+    entry_z: float = 1.75,
+    exit_z: float = 0.25,
+    long_short: bool = False,
+    max_leverage: float = 1.0,
     vol_window: int = 30,
-    vol_target: float = 0.02,
+    vol_target: float | None = None,
+    # trend gate
+    use_trend_gate: bool = True,
+    gate_ma_months: int = 10,
+    allow_in_risk_on: bool = True,
+    allow_in_risk_off: bool = False,
+    # residual detrending
+    detrend_ema_span: int = 60,
+    # churn control
     min_hold_days: int = 5,
     cooldown_days: int = 3,
-    allow_in_risk_on: bool = False,
-    sideways_band: float | None = None,
-    regime_ma_months: int = 10,
+    # NEW: behavior switch
+    mode: str = "derisk_overbought",  # "dip_buy" or "derisk_overbought"
 ) -> pd.Series:
     """
-    Long-only mean reversion on rolling z-score of price.
+    Long-only zscore model on residual:
+      resid = log(price) - EMA(log(price))
 
-    Logic:
-      z = (price - mean) / std
+    mode="dip_buy" (old behavior):
       - Enter long when z < -entry_z
       - Exit when z > -exit_z
 
-    Output is UN-SHIFTED target position in [0, 1].
+    mode="derisk_overbought" (recommended for ensembles):
+      - Base is invested (1) when allowed (risk-on by default)
+      - De-risk to 0 when z > entry_z
+      - Re-enter to 1 when z < exit_z
+
+    Output: UN-SHIFTED position in [0,1].
     """
     price = price_series.astype(float).replace([np.inf, -np.inf], np.nan)
-    logp = np.log(price.replace(0.0, np.nan))
+    idx = price.index
 
-    mu = _rolling_mean(logp, window)
-    sd = _rolling_std(logp, window)
-    sd = sd.where(sd >= 1e-8, np.nan)
+    logp = np.log(price.where(price > 0)).replace([np.inf, -np.inf], np.nan)
 
-    z = (logp - mu) / sd
-    z = z.replace([np.inf, -np.inf], np.nan)
+    ema = logp.ewm(
+        span=int(detrend_ema_span),
+        min_periods=max(5, detrend_ema_span // 3),
+        adjust=False,
+    ).mean()
+    resid = (logp - ema).replace([np.inf, -np.inf], np.nan)
 
-    risk_on = _monthly_risk_on_gate(price, ma_months=regime_ma_months)
-    allow_risk_on = bool(allow_in_risk_on)
+    mu = _rolling_mean(resid, window)
+    sd = _rolling_std(resid, window).where(lambda s: s >= 1e-8)
+    z = ((resid - mu) / sd).replace([np.inf, -np.inf], np.nan)
 
-    if sideways_band is not None and np.isfinite(sideways_band) and float(sideways_band) > 0:
-        try:
-            monthly_close = price.resample("ME").last()
-        except ValueError:
-            monthly_close = price.resample("M").last()
-        monthly_ma = monthly_close.rolling(int(regime_ma_months), min_periods=int(regime_ma_months)).mean()
-        ma_daily = monthly_ma.reindex(price.index, method="ffill")
-        distance = ((price / ma_daily) - 1.0).abs()
-        sideways = (distance <= float(sideways_band)).fillna(False)
-        trade_gate = (~risk_on) | sideways
+    if use_trend_gate:
+        risk_on = _risk_on_gate_from_monthly_ma(price.dropna(), ma_months=gate_ma_months)
+        risk_on = risk_on.reindex(idx).fillna(0.0)
     else:
-        trade_gate = (~risk_on)
+        risk_on = pd.Series(1.0, index=idx)
 
-    pos = pd.Series(0.0, index=price.index)
+    pos = pd.Series(0.0, index=idx, dtype=float)
+
     in_pos = 0.0
-    hold_days = 0
-    cooldown_left = 0
+    hold = 0
+    cooldown = 0
+    prev_allowed = False
 
-    min_hold_days = max(0, int(min_hold_days))
-    cooldown_days = max(0, int(cooldown_days))
+    for i in range(len(idx)):
+        is_risk_on = (risk_on.iloc[i] > 0.5)
+        allowed = (is_risk_on and allow_in_risk_on) or ((not is_risk_on) and allow_in_risk_off)
 
-    for i in range(len(z)):
-        zi = z.iloc[i]
-        can_trade = bool(trade_gate.iloc[i]) or allow_risk_on
-
-        if not can_trade:
+        if not allowed:
             in_pos = 0.0
-            hold_days = 0
-            if cooldown_days > 0:
-                cooldown_left = max(cooldown_left, cooldown_days)
+            hold = 0
+            cooldown = 0
+            prev_allowed = False
             pos.iloc[i] = 0.0
-            if cooldown_left > 0:
-                cooldown_left -= 1
             continue
 
+        # entering an allowed regime: default invested for derisk mode
+        if (not prev_allowed) and (mode == "derisk_overbought"):
+            in_pos = 1.0
+        prev_allowed = True
+
+        if hold > 0:
+            hold -= 1
+        if cooldown > 0:
+            cooldown -= 1
+
+        zi = z.iloc[i]
         if np.isnan(zi):
             pos.iloc[i] = in_pos
-            if in_pos > 0.0:
-                hold_days += 1
-            if cooldown_left > 0:
-                cooldown_left -= 1
             continue
 
-        if cooldown_left <= 0:
-            if in_pos == 0.0:
-                if zi < -float(entry_z):
-                    in_pos = 1.0
-                    hold_days = 0
-                    cooldown_left = cooldown_days
-            else:
-                if hold_days >= min_hold_days and zi > -float(exit_z):
-                    in_pos = 0.0
-                    hold_days = 0
-                    cooldown_left = cooldown_days
+        if cooldown == 0:
+            if mode == "dip_buy":
+                # Buy dips
+                if in_pos == 0.0:
+                    if zi < -float(entry_z):
+                        in_pos = 1.0
+                        hold = int(min_hold_days)
+                        cooldown = int(cooldown_days)
+                else:
+                    if zi > -float(exit_z):
+                        in_pos = 0.0
+                        hold = int(min_hold_days)
+                        cooldown = int(cooldown_days)
 
-        if in_pos > 0.0:
-            hold_days += 1
+            elif mode == "derisk_overbought":
+                # Sell rips / reduce exposure when stretched
+                if in_pos == 1.0:
+                    if zi > float(entry_z):
+                        in_pos = 0.0
+                        hold = int(min_hold_days)
+                        cooldown = int(cooldown_days)
+                else:
+                    if zi < float(exit_z):
+                        in_pos = 1.0
+                        hold = int(min_hold_days)
+                        cooldown = int(cooldown_days)
+            else:
+                raise ValueError("mode must be 'dip_buy' or 'derisk_overbought'")
 
         pos.iloc[i] = in_pos
 
-        if cooldown_left > 0:
-            cooldown_left -= 1
-
-    # Optional: scale DOWN in high vol (never scale up)
-    vol_window = int(vol_window)
-    if vol_window > 1 and vol_target is not None and np.isfinite(vol_target) and vol_target > 0:
+    # Optional vol scaling DOWN only
+    if vol_target is not None and np.isfinite(vol_target) and float(vol_target) > 0 and int(vol_window) > 1:
         ret = price.pct_change()
-        vol = ret.rolling(vol_window, min_periods=max(3, vol_window // 3)).std()
-        scale = (vol_target / vol).replace([np.inf, -np.inf], np.nan)
-        scale = scale.clip(0.0, 1.0)  # never lever up
+        vol = ret.rolling(int(vol_window), min_periods=max(5, vol_window // 3)).std()
+        scale = (float(vol_target) / vol).replace([np.inf, -np.inf], np.nan).clip(0.0, 1.0)
         pos = (pos * scale).fillna(0.0)
 
-    pos = pos.fillna(0.0)
-    pos = pos.clip(0.0, float(min(max_leverage, 1.0)))
-    return pos
+    cap = float(min(max_leverage, 1.0))
+    return pos.fillna(0.0).clip(0.0, cap)

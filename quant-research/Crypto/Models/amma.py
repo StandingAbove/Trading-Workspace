@@ -1,3 +1,4 @@
+# Models/amma.py
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Union
@@ -43,6 +44,7 @@ def amma_signal(
     momentum_weights: Dict[int, float] = None,
     threshold: float = 0.0,
     normalize_weights: bool = True,
+    update_freq: str = "daily",  # "daily" or "monthly"
 ) -> pd.Series:
     """
     Long-only AMMA position in [0, 1], UN-SHIFTED.
@@ -53,6 +55,10 @@ def amma_signal(
 
     position = sum(component_w)
     If normalize_weights=True, weights are normalized to sum to 1, so position is in [0,1].
+
+    update_freq="monthly":
+      - Compute momentum on month-end closes
+      - Forward-fill within each month (low turnover)
 
     IMPORTANT:
       - This function does NOT shift.
@@ -75,15 +81,36 @@ def amma_signal(
     else:
         raise TypeError("data must be a pandas Series or DataFrame")
 
-    pos = pd.Series(0.0, index=idx, dtype=float)
+    price = price.replace([np.inf, -np.inf], np.nan)
 
+    if update_freq == "monthly":
+        # month-end close (pandas version safe)
+        try:
+            monthly = price.resample("ME").last()
+        except ValueError:
+            monthly = price.resample("M").last()
+
+        pos_m = pd.Series(0.0, index=monthly.index, dtype=float)
+
+        for window, weight in weights.items():
+            # convert trading-day window to months (20->1, 60->3, 120->6, 252->12)
+            months = max(1, int(round(int(window) / 21)))
+            mom = monthly.pct_change(months)
+            pos_m += (mom > float(threshold)).astype(float) * float(weight)
+
+        pos_d = pos_m.reindex(price.index, method="ffill").fillna(0.0)
+        return pos_d.reindex(idx).fillna(0.0).clip(0.0, 1.0)
+
+    if update_freq != "daily":
+        raise ValueError("update_freq must be 'daily' or 'monthly'")
+
+    # daily behavior (existing)
+    pos = pd.Series(0.0, index=idx, dtype=float)
     for window, weight in weights.items():
         mom = price.pct_change(int(window))
         pos += (mom > float(threshold)).astype(float) * float(weight)
 
-    # Hard long-only bounds (no leverage)
-    pos = pos.fillna(0.0).clip(0.0, 1.0)
-    return pos
+    return pos.fillna(0.0).clip(0.0, 1.0)
 
 
 # =========================================================
@@ -157,9 +184,10 @@ def amma_from_ibit_csv(
     momentum_weights: Dict[int, float],
     threshold: float = 0.0,
     normalize_weights: bool = True,
+    update_freq: str = "daily",
 ) -> pd.DataFrame:
     """
-    Build daily AMMA signal directly from the IBIT CSV schema.
+    Build AMMA signal directly from the IBIT CSV schema.
 
     Output columns: Date, price, amma_weight (UN-SHIFTED in [0,1]).
     (Engine should shift positions, not this function.)
@@ -184,6 +212,7 @@ def amma_from_ibit_csv(
         momentum_weights=momentum_weights,
         threshold=threshold,
         normalize_weights=normalize_weights,
+        update_freq=update_freq,
     )
 
     ibit["amma_weight"] = s.values

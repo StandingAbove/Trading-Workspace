@@ -1,3 +1,4 @@
+# main.py
 import pandas as pd
 
 from config import *
@@ -14,11 +15,14 @@ from Backtest.metrics import build_summary_table
 
 
 # =========================================================
-# Select Model
+# Select Asset + Model
 # =========================================================
 
 ASSET_TO_TRADE = "IBIT"     # "IBIT" or "BTC"
 MODEL_TO_RUN = "trend"      # "amma", "zscore", "trend", "ou", "mining", "buyhold"
+
+# AMMA turnover control
+AMMA_UPDATE_FREQ = "monthly"  # "daily" or "monthly"
 
 
 # =========================================================
@@ -60,6 +64,7 @@ def signal_wrapper(full_df: pd.DataFrame) -> pd.Series:
             momentum_weights={20: 0.25, 60: 0.25, 120: 0.25, 252: 0.25},
             threshold=0.0,
             normalize_weights=True,
+            update_freq=AMMA_UPDATE_FREQ,
         )
 
     if MODEL_TO_RUN == "zscore":
@@ -76,19 +81,16 @@ def signal_wrapper(full_df: pd.DataFrame) -> pd.Series:
         )
 
     if MODEL_TO_RUN == "trend":
-        vol_target = VOL_TARGET if USE_VOL_TARGET else None
+        # Trend model is now monthly; choose mode here
+        # mode="faber_10m" or "tsmom_12m"
         return trend_signal(
             full_df,
             price_column=price_col,
-            fast_window=TREND_FAST_WINDOW,
-            slow_window=TREND_SLOW_WINDOW,
-            long_only=True,
-            leverage_aggressive=TREND_AGGRESSIVE,
-            leverage_neutral=TREND_NEUTRAL,
-            leverage_defensive=TREND_DEFENSIVE,
-            vol_window=VOL_WINDOW,
-            vol_target=vol_target,
-            max_leverage=1.0,
+            mode="faber_10m",
+            ma_months=10,
+            mom_months=12,
+            exposure_on=1.0,
+            exposure_off=0.0,
         )
 
     if MODEL_TO_RUN == "ou":
@@ -128,6 +130,7 @@ pos_amma = amma_signal(
     momentum_weights={20: 0.25, 60: 0.25, 120: 0.25, 252: 0.25},
     threshold=0.0,
     normalize_weights=True,
+    update_freq=AMMA_UPDATE_FREQ,
 )
 
 pos_model = signal_wrapper(df)

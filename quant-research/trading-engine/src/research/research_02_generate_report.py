@@ -11,7 +11,6 @@ TRADING_DAYS = 365
 SEED = 42
 ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts" / "research_02"
 BTC_PATH = Path(__file__).resolve().parents[3] / "Market Data" / "Crypto Data" / "BTC.csv"
-MINING_PATH = Path(__file__).resolve().parents[3] / "Market Data" / "Crypto Data" / "BTC_Mining_Cost.csv"
 
 
 @dataclass
@@ -42,13 +41,8 @@ def load_data() -> pd.DataFrame:
     btc["date"] = pd.to_datetime(btc["Start"])
     btc = btc[["date", "Close"]].rename(columns={"Close": "price"})
 
-    mining = pd.read_csv(MINING_PATH)
-    mining["date"] = pd.to_datetime(mining["timestamp"])
-    mining = mining[["date", "Difficulty Regression Model"]].rename(columns={"Difficulty Regression Model": "cost_proxy"})
-
-    df = btc.merge(mining, on="date", how="inner").sort_values("date")
-    df = df.dropna(subset=["price", "cost_proxy"]).set_index("date")
-    df = df[(df["price"] > 0) & (df["cost_proxy"] > 0)]
+    df = btc.sort_values("date").dropna(subset=["price"]).set_index("date")
+    df = df[df["price"] > 0]
     return df
 
 
@@ -86,12 +80,6 @@ def build_model_returns(df: pd.DataFrame) -> pd.DataFrame:
     ma_slow = price.rolling(200, min_periods=80).mean()
     trend_pos = np.sign(ma_fast - ma_slow).replace(0, 1).fillna(0.0).shift(1).fillna(0.0)
 
-    # Mining-cost signal: when price materially exceeds production cost proxy, trend tends to persist
-    edge = np.log(price / df["cost_proxy"])
-    edge_z = (edge - edge.rolling(180, min_periods=60).mean()) / edge.rolling(180, min_periods=60).std()
-    mining_pos = np.where(edge_z > 0.3, 1.0, np.where(edge_z < -0.3, -0.5, 0.0))
-    mining_pos = pd.Series(mining_pos, index=df.index).shift(1).fillna(0.0)
-
     # Z-score signal: straightforward statistical mean reversion around rolling fair value
     fair = price.rolling(120, min_periods=40).mean()
     z = (price - fair) / price.rolling(120, min_periods=40).std()
@@ -101,7 +89,6 @@ def build_model_returns(df: pd.DataFrame) -> pd.DataFrame:
         {
             "OU": ou_pos * ret,
             "Trend": trend_pos * ret,
-            "MiningCost": mining_pos * ret,
             "ZScore": z_pos * ret,
             "BuyHold": ret,
         },
@@ -150,13 +137,13 @@ def df_to_markdown(df: pd.DataFrame) -> str:
 
 
 def make_report(model_returns: pd.DataFrame, metrics_df: pd.DataFrame, combos_df: pd.DataFrame, marginal_df: pd.DataFrame) -> str:
-    corr = model_returns[["OU", "Trend", "MiningCost", "ZScore"]].corr().round(2)
+    corr = model_returns[["OU", "Trend", "ZScore"]].corr().round(2)
     top_combo = combos_df.sort_values("sharpe", ascending=False).iloc[0]
-    full_combo = combos_df.loc[combos_df["combo"] == "OU+Trend+MiningCost+ZScore"].iloc[0]
+    full_combo = combos_df.loc[combos_df["combo"] == "OU+Trend+ZScore"].iloc[0]
 
     return f"""# Research 02 — Bitcoin Multi-Model Report
 
-## 1) Underlying logic of the four models
+## 1) Underlying logic of the three models
 
 ### OU (Ornstein-Uhlenbeck) model intuition
 The OU idea starts from stochastic calculus intuition: instead of price moving as a pure random walk, we model a latent process that gets "pulled" back toward a mean. For BTC, we don't assume permanent mean-reversion in raw price; we apply OU logic on a de-trended log-price residual. When that residual is far from its local center (high absolute z-score), we size for reversion. This makes OU a short-horizon dislocation model.
@@ -164,27 +151,23 @@ The OU idea starts from stochastic calculus intuition: instead of price moving a
 ### Trend model logic (including halving/macro context)
 Trend follows the view that BTC can remain in persistent regimes due to structural demand/supply shifts. Halving cycles reduce issuance and can amplify trend persistence when demand is stable or rising; macro liquidity cycles can also lengthen trend phases. A 50/200 moving-average direction captures this medium-horizon persistence.
 
-### Mining-cost model logic
-Mining cost is a fundamental anchor. When spot stays materially above production-cost proxies, miner profitability improves, forced selling pressure often eases, and trend continuation probability can rise. When spot is below cost proxy, miner stress can increase downside risk. This model converts the price/cost gap into a regime signal.
-
 ### Z-score model logic (statistical mean reversion)
 Z-score uses basic statistics: estimate rolling fair value and dispersion, then standardize current deviation. Large positive z means stretched high; large negative z means stretched low. The strategy uses stateful entry/exit bands to avoid overtrading near the center.
 
-## 2) How these four models work on Bitcoin
+## 2) How these three models work on Bitcoin
 - OU and Z-score both target short-term mispricings (reversion alpha).
 - Trend captures medium-term persistence from macro/flow regime changes.
-- Mining-cost injects a slower fundamental state variable tied to BTC production economics.
-- Together they diversify signal horizon (short vs medium), source (technical vs fundamental), and behavior (reversion vs continuation).
+- Together they diversify signal horizon (short vs medium), source (technical), and behavior (reversion vs continuation).
 
 ## 3) Why the model set provides an edge
-The edge comes from combining partially uncorrelated return streams. Pairing reversion models (OU/Z-score) with persistence models (Trend/MiningCost) reduces dependence on one market regime. This gives better risk-adjusted performance than single-model deployment in this backtest window.
+The edge comes from combining partially uncorrelated return streams. Pairing reversion models (OU/Z-score) with persistence models (Trend) reduces dependence on one market regime. This gives better risk-adjusted performance than single-model deployment in this backtest window.
 
 ## 4) Linear combination approach (and nonlinear next step)
 I used a **linear combination** of model returns with long-only weights optimized on Sharpe per combination set. Linear blends are transparent, stable, and easy to risk-budget.
 
 A nonlinear combo is still worth trying (not yet tested):
 1. Regime-gated mixtures (e.g., trend dominates in high ADX / strong macro beta states).
-2. Tree/boosting meta-models to learn interactions (e.g., mining-cost only matters when trend is positive).
+2. Tree/boosting meta-models to learn interactions among OU/Trend/Z-score states.
 3. Volatility-aware switching policies (different weights in high-vol vs low-vol conditions).
 
 ## 5) Individual + combination metrics
@@ -192,7 +175,7 @@ A nonlinear combo is still worth trying (not yet tested):
 ### 5.1 Individual model metrics
 {df_to_markdown(metrics_df)}
 
-### 5.2 All 2-model, 3-model, and 4-model combinations
+### 5.2 All 2-model and 3-model combinations
 {df_to_markdown(combos_df)}
 
 Top Sharpe combination: **{top_combo['combo']}** with Sharpe **{top_combo['sharpe']:.2f}** and annual return **{format_pct(top_combo['annual_return'])}**.
@@ -214,7 +197,7 @@ xychart-beta
 ## 7) Strategy application to other crypto and asset classes
 - **Large-cap alts (ETH/SOL):** Trend + z-score usually transfer best due to liquidity and persistent flows.
 - **Mid/small-cap alts:** OU/Z-score may degrade from jump risk and thinner books; tighter risk limits needed.
-- **Traditional assets (equities/FX/commodities):** Trend and z-score generalize well; mining-cost is BTC-specific, but can be replaced with production-cost proxies in commodities.
+- **Traditional assets (equities/FX/commodities):** Trend and z-score generalize well.
 - **Cross-asset portfolios:** Combining these orthogonal archetypes can improve diversification if execution costs are controlled.
 
 ## 8) Marginal analysis
@@ -223,7 +206,7 @@ Marginal analysis below estimates incremental contribution of each model vs a po
 {df_to_markdown(marginal_df)}
 
 ## 9) Does the model add portfolio value?
-In this sample, the full four-model combination adds value primarily through **risk control** (lower volatility and shallower drawdown) rather than pure Sharpe outperformance against buy-and-hold BTC. Full combo annual return is **{format_pct(full_combo['annual_return'])}** with Sharpe **{full_combo['sharpe']:.2f}**, versus Buy/Hold Sharpe **{metrics_df.loc[metrics_df['model']=='BuyHold','sharpe'].iloc[0]:.2f}**. For multi-asset portfolios where drawdown budget matters, this can still improve overall allocation efficiency.
+In this sample, the full three-model combination adds value primarily through **risk control** (lower volatility and shallower drawdown) rather than pure Sharpe outperformance against buy-and-hold BTC. Full combo annual return is **{format_pct(full_combo['annual_return'])}** with Sharpe **{full_combo['sharpe']:.2f}**, versus Buy/Hold Sharpe **{metrics_df.loc[metrics_df['model']=='BuyHold','sharpe'].iloc[0]:.2f}**. For multi-asset portfolios where drawdown budget matters, this can still improve overall allocation efficiency.
 """
 
 
@@ -234,14 +217,14 @@ def main() -> None:
     model_returns = build_model_returns(df)
 
     metrics_rows = []
-    for col in ["OU", "Trend", "MiningCost", "ZScore", "BuyHold"]:
+    for col in ["OU", "Trend", "ZScore", "BuyHold"]:
         m = compute_metrics(model_returns[col])
         metrics_rows.append({"model": col, **m.__dict__})
     metrics_df = pd.DataFrame(metrics_rows).sort_values("sharpe", ascending=False)
 
-    model_cols = ["OU", "Trend", "MiningCost", "ZScore"]
+    model_cols = ["OU", "Trend", "ZScore"]
     combo_rows = []
-    for k in [1, 2, 3, 4]:
+    for k in [1, 2, 3]:
         for subset in combinations(model_cols, k):
             cols = list(subset)
             w = optimize_weights(model_returns, cols)

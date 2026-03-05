@@ -1,1 +1,0 @@
-from trading_engine.aggregators.registry import AGGREGATORS

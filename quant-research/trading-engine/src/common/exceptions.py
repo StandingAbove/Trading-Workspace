@@ -1,2 +1,0 @@
-class NotATradingDayException(Exception):
-    pass

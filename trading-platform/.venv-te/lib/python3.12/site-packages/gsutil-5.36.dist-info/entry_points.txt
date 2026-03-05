@@ -1,0 +1,2 @@
+[console_scripts]
+gsutil = gslib.__main__:main

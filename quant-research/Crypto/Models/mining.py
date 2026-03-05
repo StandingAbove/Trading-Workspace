@@ -1,5 +1,4 @@
 # Models/mining.py
-
 from __future__ import annotations
 
 import numpy as np
@@ -7,7 +6,6 @@ import pandas as pd
 
 
 def _month_end_close(price: pd.Series) -> pd.Series:
-    """Month-end close with pandas-version fallback."""
     try:
         return price.resample("ME").last()
     except ValueError:
@@ -15,25 +13,18 @@ def _month_end_close(price: pd.Series) -> pd.Series:
 
 
 def _risk_on_gate_from_monthly_ma(price: pd.Series, ma_months: int = 10) -> pd.Series:
-    """
-    Monthly trend gate:
-      risk_on = monthly_close > MA(monthly_close, ma_months)
-    Forward-filled to daily index.
-
-    This avoids within-month lookahead because the signal only updates on month-end.
-    """
     monthly = _month_end_close(price)
     ma = monthly.rolling(int(ma_months), min_periods=int(ma_months)).mean()
     risk_on_m = (monthly > ma).astype(float)
     return risk_on_m.reindex(price.index, method="ffill").fillna(0.0)
 
 
-def rolling_zscore(series: pd.Series, window: int) -> pd.Series:
-    window = int(window)
-    minp = min(window, max(5, window // 3))
-    mu = series.rolling(window, min_periods=minp).mean()
-    sd = series.rolling(window, min_periods=minp).std()
-    z = (series - mu) / sd
+def _rolling_zscore(x: pd.Series, window: int) -> pd.Series:
+    w = int(window)
+    minp = min(w, max(10, w // 3))
+    mu = x.rolling(w, min_periods=minp).mean()
+    sd = x.rolling(w, min_periods=minp).std()
+    z = (x - mu) / sd
     return z.replace([np.inf, -np.inf], np.nan)
 
 
@@ -41,38 +32,41 @@ def mining_signal(
     df: pd.DataFrame,
     price_column: str = "IBIT_close",
     cost_column: str = "COST_TO_MINE",
-    z_window: int = 180,
-    entry_z: float = 1.0,
-    exit_z: float = 0.0,
+    # edge + normalization
+    z_window: int = 252,
     use_log_edge: bool = True,
-    # --- new knobs (slow regime / low turnover) ---
-    smooth_span: int = 30,
-    min_hold_days: int = 20,
-    cooldown_days: int = 5,
-    # optional trend gate
-    use_trend_gate: bool = False,
+    # slow the signal down
+    smooth_span: int = 45,
+    # convert z -> exposure
+    z_lo: float = -1.0,      # "cheap" boundary
+    z_hi: float = +1.0,      # "expensive" boundary
+    min_exposure: float = 0.35,
+    max_exposure: float = 1.00,
+    # optional trend regime gate (monthly)
+    use_trend_gate: bool = True,
     gate_ma_months: int = 10,
-    allow_in_risk_on: bool = True,
+    risk_off_cap: float = 0.60,  # if risk-off, cap exposure here (still avoids full cash drag)
 ) -> pd.Series:
     """
-    Long-only mining-cost valuation / regime filter.
+    Long-only mining valuation tilt (UN-SHIFTED), continuous exposure in [0,1].
 
-    - Edge compares price to mining cost:
-        default: edge = log(price / cost)
-    - Smooth edge with EMA to reduce noise.
-    - Standardize with rolling z-score.
+    Steps:
+      1) edge = log(price/cost)  (or simple ratio edge)
+      2) smooth edge with EMA (slow)
+      3) rolling z-score of smoothed edge
+      4) map z into exposure:
+           z <= z_lo  -> max_exposure
+           z >= z_hi  -> min_exposure
+           linear in between
 
-    Trade (hysteresis + low turnover):
-      - Enter long when z < -entry_z
-      - Exit long when z > -exit_z
-
-    Output:
-      UN-SHIFTED position in [0,1]. Engine should apply shift(1) and final clipping.
+    Why this helps:
+      - avoids binary whipsaws
+      - keeps exposure near 1 most of the time (tracks buyhold)
+      - still de-risks when price is very rich vs mining cost
     """
+    idx = df.index
     price = df[price_column].astype(float).replace([np.inf, -np.inf], np.nan)
     cost = df[cost_column].astype(float).replace([np.inf, -np.inf], np.nan)
-
-    # Protect against bad cost values
     cost = cost.where(cost > 0)
 
     if use_log_edge:
@@ -82,56 +76,34 @@ def mining_signal(
 
     edge = edge.replace([np.inf, -np.inf], np.nan)
 
-    # Smooth (EMA) to slow the signal
-    smooth_span = int(max(2, smooth_span))
-    minp = max(5, smooth_span // 3)
-    edge_s = edge.ewm(span=smooth_span, min_periods=minp, adjust=False).mean()
+    # smooth to reduce churn
+    span = int(max(5, smooth_span))
+    edge_s = edge.ewm(span=span, min_periods=max(10, span // 3), adjust=False).mean()
 
-    z = rolling_zscore(edge_s, int(z_window))
+    z = _rolling_zscore(edge_s, int(z_window))
 
-    # Optional trend gate
+    # map z -> exposure (invert: expensive => lower exposure)
+    z_lo = float(z_lo)
+    z_hi = float(z_hi)
+    if z_hi <= z_lo:
+        raise ValueError("z_hi must be > z_lo")
+
+    min_exposure = float(min_exposure)
+    max_exposure = float(max_exposure)
+    min_exposure = float(np.clip(min_exposure, 0.0, 1.0))
+    max_exposure = float(np.clip(max_exposure, 0.0, 1.0))
+
+    # linear interpolation: cheap (low z) => high exposure
+    # exposure = max_exposure at z_lo, min_exposure at z_hi
+    expo = pd.Series(np.nan, index=idx, dtype=float)
+    t = (z - z_lo) / (z_hi - z_lo)  # 0 at z_lo, 1 at z_hi
+    expo = max_exposure + (min_exposure - max_exposure) * t
+    expo = expo.clip(lower=min_exposure, upper=max_exposure)
+
+    # optional monthly trend gate (cap exposure in risk-off)
     if use_trend_gate:
-        risk_on = _risk_on_gate_from_monthly_ma(price.dropna(), ma_months=gate_ma_months)
-        risk_on = risk_on.reindex(df.index).fillna(0.0)
-    else:
-        risk_on = pd.Series(0.0, index=df.index)
+        risk_on = _risk_on_gate_from_monthly_ma(price.dropna(), ma_months=gate_ma_months).reindex(idx).fillna(0.0)
+        cap = float(np.clip(risk_off_cap, 0.0, 1.0))
+        expo = expo.where(risk_on > 0.5, other=np.minimum(expo, cap))
 
-    pos = pd.Series(0.0, index=df.index, dtype=float)
-    in_pos = 0.0
-    hold = 0
-    cooldown = 0
-
-    for i in range(len(df.index)):
-        gated_off = (risk_on.iloc[i] > 0.5) and (not allow_in_risk_on)
-        if gated_off:
-            in_pos = 0.0
-            hold = 0
-            cooldown = 0
-            pos.iloc[i] = 0.0
-            continue
-
-        if hold > 0:
-            hold -= 1
-        if cooldown > 0:
-            cooldown -= 1
-
-        zi = z.iloc[i]
-        if np.isnan(zi):
-            pos.iloc[i] = in_pos
-            continue
-
-        if cooldown == 0:
-            if in_pos == 0.0:
-                if zi < -float(entry_z):
-                    in_pos = 1.0
-                    hold = int(min_hold_days)
-                    cooldown = int(cooldown_days)
-            else:
-                if zi > -float(exit_z):
-                    in_pos = 0.0
-                    hold = int(min_hold_days)
-                    cooldown = int(cooldown_days)
-
-        pos.iloc[i] = in_pos
-
-    return pos.fillna(0.0).clip(0.0, 1.0)
+    return expo.fillna(min_exposure).clip(0.0, 1.0)

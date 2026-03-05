@@ -30,8 +30,8 @@ COST_COLUMN_MINE = "COST_TO_MINE"
 # Transaction Costs (Crypto Spot Baseline)
 # =========================================================
 
-FEE_BPS = 10.0          # exchange fee
-SLIPPAGE_BPS = 5.0      # assumed slippage
+FEE_BPS = 0          # exchange fee
+SLIPPAGE_BPS = 0      # assumed slippage
 ANNUAL_BORROW_RATE = 0.0
 
 # For perpetual futures (optional)
